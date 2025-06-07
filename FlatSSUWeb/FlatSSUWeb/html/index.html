@@ -1,0 +1,451 @@
+﻿
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8" />
+    <title>FlatSSU 경로 테스트</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        html, body {
+            margin: 0;
+            height: 100%;
+        }
+
+        #map {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            right: 0;
+        }
+
+        .ctrl-bar {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            z-index: 1000;
+            background: #fff;
+            border-radius: 6px;
+            box-shadow: 0 0 6px rgba(0,0,0,.15);
+            padding: 4px;
+        }
+
+        select, button {
+            margin: 2px;
+            padding: 2px 4px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <!-- 지도 영역 -->
+    <div id="map"></div>
+
+    <!-- 컨트롤 바 -->
+    <div class="ctrl-bar">
+        <select id="startSel"><option>출발 선택</option></select>
+        <select id="endSel"><option>도착 선택</option></select>
+        <button id="findBtn">경로 찾기</button>
+    </div>
+
+    <!-- ssu campus 이미지(Leaflet 단순 CRS) 는 서버 루트에 ssu_map.png 로 있음 -->
+    <script type="module">
+        // 1. 지도 기본 설정 (단순 이미지 좌표계)
+        const imgW = 1188, imgH = 768;               // ssu_map.png 해상도
+        const map = L.map('map', { crs: L.CRS.Simple, minZoom: -2, maxZoom: 4 });
+        L.imageOverlay('ssu_map.png', [[0, 0], [imgH, imgW]]).addTo(map);
+        map.fitBounds([[0, 0], [imgH, imgW]]);
+
+        // 2. 전역 데이터
+        let nodes = [];                // [{name,lat,lng}, …]
+        const name2idx = {};           // {"노드명": index}
+        let routeLayer;                // L.layerGroup for current routes
+
+        // 3. JSON, CSV 가져오기
+        const [jnodes, csv] = await Promise.all([
+            fetch('flatssu_nodes.json').then(r => r.json()),
+            fetch('node_connect.csv').then(r => r.text())
+        ]);
+        nodes = jnodes;
+        nodes.forEach((n, i) => { name2idx[n.name] = i; });
+
+        // 4. 노드 마커 & 간선(빨간) 기본 표시
+        nodes.forEach(n => {
+            L.circleMarker([n.lat, n.lng], { radius: 6, color: '#2980b9', fill: true, fillOpacity: .9 })
+                .addTo(map).bindTooltip(n.name);
+        });
+        csv.trim().split('\n').slice(1).forEach(line => {
+            const [a, b] = line.split(',');
+            const A = nodes[name2idx[a]]; const B = nodes[name2idx[b]];
+            if (A && B) { L.polyline([[A.lat, A.lng], [B.lat, B.lng]], { color: '#e74c3c', weight: 2, opacity: .3 }).addTo(map); }
+        });
+
+        // 5. 드롭다운 채우기
+        const sSel = document.getElementById('startSel');
+        const eSel = document.getElementById('endSel');
+        nodes.forEach(n => {
+            sSel.add(new Option(n.name, n.name));
+            eSel.add(new Option(n.name, n.name));
+        });
+
+        // 6. WebAssembly 모듈 로드
+        const Module = await FlatSSUPathModule({ locateFile: f => `/wasm_build/${f}` });
+        Module.initGraph();
+
+        // 7. 버튼 클릭 → 두 경로 모두 그리기
+        document.getElementById('findBtn').onclick = () => {
+            const from = sSel.value, to = eSel.value;
+            if (from.includes('선택') || to.includes('선택')) { alert('출발/도착 노드를 선택하세요'); return; }
+            const s = name2idx[from], t = name2idx[to];
+            if (routeLayer) routeLayer.remove();
+            routeLayer = L.layerGroup().addTo(map);
+
+            drawRoute(Module.findShortest(s, t), '#ff3b30', 4);   // 빨간 = 최단
+            drawRoute(Module.findConvenient(s, t), '#0066ff', 6); // 파란 = 편의
+        };
+
+        function drawRoute(vec, color, weight) {
+            if (!vec || vec.size() < 2) return;
+            const pts = [];
+            for (let i = 0; i < vec.size(); ++i) { const n = nodes[vec.get(i)]; pts.push([n.lat, n.lng]); }
+            L.polyline(pts, { color, weight, opacity: .9, lineCap: 'round' }).addTo(routeLayer);
+            L.circleMarker(pts[0], { radius: 5, color: '#2ecc71', fillOpacity: 1 }).addTo(routeLayer);
+            L.circleMarker(pts.at(-1), { radius: 5, color: '#e74c3c', fillOpacity: 1 }).addTo(routeLayer);
+        }
+    </script>
+
+    <!-- WebAssembly loader (생성된 JS) -->
+    <script src="/wasm_build/path_engine.js"></script>
+</body>
+</html>
+
+
+
+<!--<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>FlatSSU 테스트</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        html, body, #map {
+            height: 100%;
+            margin: 0;
+            padding: 0
+        }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: #fff;
+            padding: 6px;
+            border-radius: 4px;
+            box-shadow: 0 0 4px rgba(0,0,0,0.3)
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <select id="startNode"><option>출발지 선택…</option></select>
+        <select id="endNode"><option>도착지 선택…</option></select>
+        <button id="findRoute">경로 찾기</button>
+    </div>
+    <div id="map"></div>-->
+<!-- 1) Leaflet -->
+<!--<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>-->
+<!-- 2) WASM 모듈 (루트 기준) -->
+<!--<script src="/wasm_build/path_engine.js"></script>
+
+    <script>
+        // 지도 초기화
+        const map = L.map('map', { crs: L.CRS.Simple, minZoom: -1, maxZoom: 3 });
+        const imgW = 1188, imgH = 768;
+        L.imageOverlay('ssu_map.png', [[0, 0], [imgH, imgW]]).addTo(map);
+        map.fitBounds([[0, 0], [imgH, imgW]]);
+
+        // 노드·엣지 데이터 (html 에 inline 넣거나 외부 fetch 대신 미리 하드코딩)
+        // 4) 노드 & 엣지 (직접 채워 넣어 주세요)
+        const nodes = [
+            { "name": "숭실대 정문", "lat": 326, "lng": 135 },
+            { "name": "안익태 기념관(카페 요거바라)", "lat": 299.5, "lng": 237 },
+            { "name": "문화관", "lat": 412.5, "lng": 138.5 },
+            { "name": "경상관 1층", "lat": 478, "lng": 176.5 },
+            { "name": "경상관 2층", "lat": 479.75, "lng": 246.75 },
+            { "name": "백마관", "lat": 679, "lng": 403.5 },
+            { "name": "교육관", "lat": 676, "lng": 496.5 },
+            { "name": "벤쳐중소기업센터 출입문", "lat": 634.5, "lng": 558 },
+            { "name": "창신관", "lat": 302.5, "lng": 981.5 },
+            { "name": "글로벌브레인홀", "lat": 264, "lng": 1063 },
+            { "name": "창의관", "lat": 100, "lng": 865.5 },
+            { "name": "정보과학관", "lat": 84, "lng": 986.5 },
+            { "name": "한국기독교박물관", "lat": 294, "lng": 536 },
+            { "name": "한경직기념관", "lat": 293.5, "lng": 630.5 },
+            { "name": "형남공학관 B1출입문", "lat": 290.5, "lng": 304.5 },
+            { "name": "형남공학관 2층출입문", "lat": 293.5, "lng": 441.5 },
+            { "name": "형남공학관 3층 구름다리", "lat": 342.75, "lng": 488.25 },
+            { "name": "학생회관 4층 출입문", "lat": 472.5, "lng": 537.5 },
+            { "name": "학생회관 1층 출입문_경상관방향", "lat": 512, "lng": 298.5 },
+            { "name": "백마상", "lat": 452, "lng": 578 },
+            { "name": "베어드홀 정문", "lat": 421, "lng": 499 },
+            { "name": "중앙도서관", "lat": 391.5, "lng": 759.5 },
+            { "name": "미래관", "lat": 279.5, "lng": 752.5 },
+            { "name": "진리관 1층입구_학생회관방면", "lat": 523.5, "lng": 582 },
+            { "name": "진리관1층_2", "lat": 492.5, "lng": 637 },
+            { "name": "조만식기념관1층", "lat": 560.5, "lng": 689 },
+            { "name": "피라미드", "lat": 338, "lng": 722 },
+            { "name": "연구관", "lat": 356.5, "lng": 866.5 },
+            { "name": "베어드홀_", "lat": 413.5, "lng": 394 },
+            { "name": "베어드홀_흡연장", "lat": 429, "lng": 366 },
+            { "name": "베어드홀_학생회관방면", "lat": 437, "lng": 461.5 },
+            { "name": "숭실대 중문", "lat": 234, "lng": 489 },
+            { "name": "숭실대 후문", "lat": 171, "lng": 822 },
+            { "name": "조만식기념관3층_웨스터민스터홀 연결", "lat": 504.25, "lng": 677.25 },
+            { "name": "웨스트민스터홀_조만식기념관 연결", "lat": 486.75, "lng": 737 },
+            { "name": "레지던스홀 학교밖", "lat": 123, "lng": 1048.5 },
+            { "name": "숭실대 전산관", "lat": 252.5, "lng": 893 },
+            { "name": "농구장", "lat": 209, "lng": 754.5 },
+            { "name": "경상관 뒤쪽 계단", "lat": 559.5, "lng": 272 },
+            { "name": "쓰레기장", "lat": 675, "lng": 291 },
+            { "name": "돌계단 입구 경상관 방면", "lat": 442.75, "lng": 207.5 },
+            { "name": "돌계단 입구 안익태기념관 방면", "lat": 363, "lng": 245 },
+            { "name": "주차장 입구", "lat": 294.25, "lng": 499.25 },
+            { "name": "백마광장_정문방면", "lat": 367, "lng": 516.25 },
+            { "name": "전산관 쿱스켓 앞 삼거리", "lat": 275.5, "lng": 839 },
+            { "name": "백마광장_도서관방면", "lat": 350.5, "lng": 668.75 },
+            { "name": "백마광장_나무계단방면", "lat": 456.5, "lng": 679.5 },
+            { "name": "백마광장_학생회관방면", "lat": 448.5, "lng": 523.5 },
+            { "name": "벤쳐중소기업센터 앞 길", "lat": 607.5, "lng": 572 },
+            { "name": "조만식기념관 1층_진리관 연결", "lat": 506, "lng": 666 },
+            { "name": "숭실대 나무계단", "lat": 534.5, "lng": 704.5 },
+            { "name": "숭실대나무계단 3층", "lat": 527, "lng": 783 },
+            { "name": "연구관 앞 길", "lat": 279, "lng": 905.5 },
+            { "name": "기숙사 앞길", "lat": 265, "lng": 969 },
+            { "name": "숭실대 후문 앞길", "lat": 203.5, "lng": 827.5 },
+            { "name": "전산관2", "lat": 186.5, "lng": 916.5 },
+            { "name": "미래관쪽 오르막길", "lat": 237.5, "lng": 701 },
+            { "name": "기독교박물관 앞 길", "lat": 357, "lng": 552 },
+            { "name": "한경직기념관 앞", "lat": 311.5, "lng": 573 },
+            { "name": "한경직 기념관 방면 길", "lat": 322, "lng": 671.5 },
+            { "name": "조만식 건물 뛰쪽 길", "lat": 598, "lng": 612 },
+            { "name": "문화관 흡연장", "lat": 478, "lng": 145 },
+            { "name": "형남공학관 앞길1_구름다리", "lat": 353, "lng": 358.5 },
+            { "name": "형남공학_베어드홀 중간 길", "lat": 361.5, "lng": 414.5 },
+            { "name": "웨스터민스터홀1층", "lat": 491, "lng": 706.5 },
+            { "name": "백마상 앞길", "lat": 479.75, "lng": 566.5 },
+            { "name": "고민사거리 앞", "lat": 187, "lng": 472 },
+            { "name": "학생회관 앞 오르막길", "lat": 468.5, "lng": 331.5 },
+            { "name": "베어드홀 흡연장", "lat": 431.5, "lng": 327 },
+            { "name": "형남공학관 앞 광장", "lat": 331, "lng": 424.75 },
+            { "name": "도서관 흡연장 앞 길", "lat": 442, "lng": 760.5 },
+            { "name": "빨간트럭", "lat": 466, "lng": 789 },
+            { "name": "2층 도담식당", "lat": 461, "lng": 729.5 },
+            { "name": "경상관 앞", "lat": 475.5, "lng": 281.5 },
+            { "name": "진리관_학생회관 사이 길", "lat": 533, "lng": 567 },
+            { "name": "진리관 3층 복도끝", "lat": 586, "lng": 596 },
+            { "name": "벤쳐관 2층 테라스", "lat": 624, "lng": 596.5 },
+            { "name": "벤쳐관 4층 복도끝", "lat": 619.5, "lng": 650 },
+            { "name": "조만식기념관4층", "lat": 585.5, "lng": 676.5 },
+            { "name": "형남공학관 3층", "lat": 310, "lng": 369.75 },
+            { "name": "학생회관연결_구름다리", "lat": 468.5, "lng": 385.75 },
+            { "name": "웨스트민스터홀4층", "lat": 493.25, "lng": 721 },
+            { "name": "조만식기념관5층", "lat": 500.75, "lng": 674.5 },
+            { "name": "베어드홀 뒤편", "lat": 388.25, "lng": 332.25 }
+            /* TODO: 여기에 flatssu_nodes.json 내용 붙여넣기 */
+        ];
+        const edges = [
+            ["숭실대 정문", "문화관"],
+            ["숭실대 정문", "돌계단 입구 안익태기념관 방면"],
+            ["숭실대 정문", "돌계단 입구 경상관 방면"],
+            ["숭실대 정문", "숭실대 중문"],
+            ["안익태 기념관(카페 요거바라)", "돌계단 입구 안익태기념관 방면"],
+            ["안익태 기념관(카페 요거바라)", "형남공학관 B1출입문"],
+            ["돌계단 입구 안익태기념관 방면", "형남공학관 B1출입문"],
+            ["문화관", "문화관 흡연장"],
+            ["문화관", "경상관 1층"],
+            ["경상관 1층", "문화관 흡연장"],
+            ["경상관 1층", "돌계단 입구 경상관 방면"],
+            ["경상관 1층", "경상관 2층"],
+            ["돌계단 입구 경상관 방면", "돌계단 입구 안익태기념관 방면"],
+            ["경상관 2층", "경상관 앞"],
+            ["경상관 2층", "돌계단 입구 경상관 방면"],
+            ["경상관 앞", "학생회관 1층 출입문_경상관방향"],
+            ["학생회관 1층 출입문_경상관방향", "경상관 뒤쪽 계단"],
+            ["경상관 앞", "경상관 뒤쪽 계단"],
+            ["경상관 뒤쪽 계단", "쓰레기장"],
+            ["백마관", "교육관"],
+            ["백마관", "쓰레기장"],
+            ["교육관", "벤쳐중소기업센터 출입문"],
+            ["벤쳐중소기업센터 출입문", "벤쳐중소기업센터 앞 길"],
+            ["벤쳐중소기업센터 출입문", "벤쳐관 2층 테라스"],
+            ["벤쳐중소기업센터 출입문", "벤쳐관 4층 복도끝"],
+            ["벤쳐중소기업센터 앞 길", "조만식 건물 뛰쪽 길"],
+            ["벤쳐중소기업센터 앞 길", "진리관_학생회관 사이 길"],
+            ["조만식 건물 뛰쪽 길", "숭실대 나무계단"],
+            ["벤쳐관 2층 테라스", "벤쳐관 4층 복도끝"],
+            ["벤쳐관 2층 테라스", "진리관 3층 복도끝"],
+            ["진리관 3층 복도끝", "진리관 1층입구_학생회관방면"],
+            ["조만식 건물 뛰쪽 길", "조만식 건물 뛰쪽 길"],
+            ["진리관 1층입구_학생회관방면", "진리관1층_2"],
+            ["벤쳐관 4층 복도끝", "조만식기념관4층"],
+            ["조만식기념관4층", "조만식기념관1층"],
+            ["조만식기념관1층", "숭실대 나무계단"],
+            ["숭실대 나무계단", "숭실대나무계단 3층"],
+            ["빨간트럭", "숭실대나무계단 3층"],
+            ["빨간트럭", "도서관 흡연장 앞 길"],
+            ["도서관 흡연장 앞 길", "중앙도서관"],
+            ["중앙도서관", "피라미드"],
+            ["피라미드", "미래관"],
+            ["미래관", "전산관 쿱스켓 앞 삼거리"],
+            ["전산관 쿱스켓 앞 삼거리", "연구관 앞 길"],
+            ["연구관 앞 길", "연구관"],
+            ["전산관 쿱스켓 앞 삼거리", "숭실대 전산관"],
+            ["숭실대 전산관", "연구관 앞 길"],
+            ["연구관 앞 길", "기숙사 앞길"],
+            ["기숙사 앞길", "창신관"],
+            ["창신관", "글로벌브레인홀"],
+            ["글로벌브레인홀", "기숙사 앞길"],
+            ["글로벌브레인홀", "레지던스홀 학교밖"],
+            ["레지던스홀 학교밖", "숭실대 후문"],
+            ["숭실대 후문", "창의관"],
+            ["창의관", "정보과학관"],
+            ["정보과학관", "숭실대 후문"],
+            ["숭실대 후문 앞길", "숭실대 후문"],
+            ["전산관2", "숭실대 후문 앞길"],
+            ["숭실대 후문 앞길", "전산관 쿱스켓 앞 삼거리"],
+            ["숭실대 후문 앞길", "농구장"],
+            ["농구장", "미래관쪽 오르막길"],
+            ["미래관쪽 오르막길", "한경직 기념관 방면 길"],
+            ["한경직 기념관 방면 길", "한경직기념관"],
+            ["한경직기념관", "한경직기념관 앞"],
+            ["한경직기념관 앞", "한국기독교박물관"],
+            ["한경직기념관 앞", "기독교박물관 앞 길"],
+            ["기독교박물관 앞 길", "백마광장_정문방면"],
+            ["백마광장_정문방면", "주차장 입구"],
+            ["주차장 입구", "숭실대 중문"],
+            ["숭실대 중문", "고민사거리 앞"],
+            ["고민사거리 앞", "창의관"],
+            ["숭실대 중문", "숭실대 후문"],
+            ["한경직 기념관 방면 길", "백마광장_도서관방면"],
+            ["백마광장_도서관방면", "피라미드"],
+            ["백마광장_도서관방면", "기독교박물관 앞 길"],
+            ["기독교박물관 앞 길", "베어드홀 정문"],
+            ["베어드홀 정문", "백마광장_정문방면"],
+            ["백마광장_정문방면", "형남공학_베어드홀 중간 길"],
+            ["형남공학_베어드홀 중간 길", "형남공학관 앞길1_구름다리"],
+            ["형남공학_베어드홀 중간 길", "베어드홀_"],
+            ["형남공학_베어드홀 중간 길", "형남공학관 앞 광장"],
+            ["형남공학관 앞 광장", "형남공학관 2층출입문"],
+            ["형남공학관 2층출입문", "형남공학관 3층 구름다리"],
+            ["형남공학관 3층", "형남공학관 2층출입문"],
+            ["형남공학관 B1출입문", "형남공학관 2층출입문"],
+            ["형남공학관 B1출입문", "형남공학관 3층"],
+            ["형남공학관 3층", "형남공학관 앞길1_구름다리"],
+            ["형남공학관 앞길1_구름다리", "돌계단 입구 안익태기념관 방면"],
+            ["형남공학관 3층 구름다리", "백마광장_정문방면"],
+            ["경상관 앞", "학생회관 앞 오르막길"],
+            ["학생회관 앞 오르막길", "베어드홀 흡연장"],
+            ["베어드홀 흡연장", "베어드홀_흡연장"],
+            ["베어드홀_흡연장", "베어드홀_"],
+            ["베어드홀_", "베어드홀 정문"],
+            ["베어드홀 정문", "베어드홀_학생회관방면"],
+            ["베어드홀_학생회관방면", "베어드홀_흡연장"],
+            ["베어드홀_학생회관방면", "학생회관연결_구름다리"],
+            ["학생회관연결_구름다리", "학생회관 앞 오르막길"],
+            ["백마광장_학생회관방면", "학생회관연결_구름다리"],
+            ["백마광장_학생회관방면", "베어드홀 정문"],
+            ["베어드홀 정문", "백마상"],
+            ["백마상", "백마광장_학생회관방면"],
+            ["백마광장_학생회관방면", "학생회관 4층 출입문"],
+            ["학생회관 4층 출입문", "백마상"],
+            ["백마상", "백마상 앞길"],
+            ["백마상 앞길", "학생회관 4층 출입문"],
+            ["학생회관 4층 출입문", "학생회관 1층 출입문_경상관방향"],
+            ["백마상 앞길", "진리관_학생회관 사이 길"],
+            ["백마상 앞길", "백마광장_나무계단방면"],
+            ["백마광장_나무계단방면", "백마상"],
+            ["백마광장_나무계단방면", "진리관1층_2"],
+            ["진리관1층_2", "조만식기념관 1층_진리관 연결"],
+            ["조만식기념관 1층_진리관 연결", "조만식기념관5층"],
+            ["조만식기념관5층", "조만식기념관3층_웨스터민스터홀 연결"],
+            ["조만식기념관3층_웨스터민스터홀 연결", "조만식기념관 1층_진리관 연결"],
+            ["조만식기념관 1층_진리관 연결", "조만식기념관4층"],
+            ["조만식기념관 1층_진리관 연결", "숭실대 나무계단"],
+            ["웨스터민스터홀1층", "숭실대 나무계단"],
+            ["웨스터민스터홀1층", "조만식기념관 1층_진리관 연결"],
+            ["백마광장_나무계단방면", "웨스터민스터홀1층"],
+            ["백마광장_나무계단방면", "진리관1층_2"],
+            ["백마광장_나무계단방면", "2층 도담식당"],
+            ["조만식기념관3층_웨스터민스터홀 연결", "웨스트민스터홀_조만식기념관 연결"],
+            ["웨스트민스터홀4층", "조만식기념관5층"],
+            ["웨스트민스터홀4층", "웨스트민스터홀_조만식기념관 연결"],
+            ["웨스트민스터홀_조만식기념관 연결", "도서관 흡연장 앞 길"],
+            ["도서관 흡연장 앞 길", "2층 도담식당"],
+            ["진리관 1층입구_학생회관방면", "진리관_학생회관 사이 길"],
+            ["백마광장_나무계단방면", "백마광장_도서관방면"],
+            ["문화관", "돌계단 입구 안익태기념관 방면"],
+            ["베어드홀 흡연장", "베어드홀 뒤편"],
+            ["베어드홀 뒤편", "형남공학_베어드홀 중간 길"],
+            ["형남공학관 2층출입문", "주차장 입구"]
+
+            /* TODO: 여기에 node_connect.csv → ["출발","도착"] 배열 붙여넣기 */
+        ];
+
+        // 마커·엣지 그리기
+        const lookup = {};
+        nodes.forEach(n => {
+            lookup[n.name] = n;
+            L.marker([n.lat, n.lng]).addTo(map).bindPopup(n.name);
+        });
+        edges.forEach(([a, b]) => {
+            const A = lookup[a], B = lookup[b];
+            if (A && B) L.polyline([[A.lat, A.lng], [B.lat, B.lng]], { color: 'red', weight: 2 }).addTo(map);
+        });
+
+        // 드롭다운
+        const startSel = document.getElementById('startNode'),
+            endSel = document.getElementById('endNode');
+        nodes.forEach(n => {
+            const o = new Option(n.name, n.name);
+            startSel.append(o);
+            endSel.append(o.cloneNode(true));
+        });
+
+        // WASM 연동
+        FlatSSUPathModule({
+            locateFile: file => `/wasm_build/${file}`
+        }).then(Module => {
+            Module.initGraph(); // 내부에서 /flatssu_nodes.json, /node_connect.csv 로딩
+
+            document.getElementById('findRoute').onclick = () => {
+                const from = startSel.value, to = endSel.value;
+                if (!from || !to || from.startsWith('출발') || to.startsWith('도착')) {
+                    return alert('출발지와 도착지를 모두 선택해주세요');
+                }
+                // 이전 경로 지우기
+                window.routeLayer ? routeLayer.clearLayers()
+                    : window.routeLayer = L.layerGroup().addTo(map);
+
+                const name2idx = nodes.reduce((m, n, i) => (m[n.name] = i, m), {});
+                //const vec = Module.findPath(name2idx[from], name2idx[to]);
+                const vec = Module.findConvenient(name2idx[from], name2idx[to]);
+
+
+                // VectorInt → JS 배열
+                const idxs = [];
+                for (let i = 0; i < vec.size(); i++) idxs.push(vec.get(i));
+
+                // 그리기
+                const latlngs = idxs.map(i => [nodes[i].lat, nodes[i].lng]);
+                L.polyline(latlngs, { weight: 4, color: 'blue', opacity: 0.7 }).addTo(routeLayer);
+                L.circleMarker(latlngs[0], { radius: 6, color: '#0f0' }).addTo(routeLayer);
+                L.circleMarker(latlngs.at(-1), { radius: 6, color: '#f00' }).addTo(routeLayer);
+            };
+        });
+    </script>
+</body>
+</html>-->
